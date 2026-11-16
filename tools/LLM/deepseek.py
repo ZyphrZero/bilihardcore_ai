@@ -1,42 +1,25 @@
-import requests
-from typing import Dict, Any, Optional
-from config.config import PROMPT, load_model_config, load_api_key
-from time import time
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""DeepSeek 适配器（实际的请求逻辑在 tools/LLM/client.py）"""
+
+from typing import Optional
+
+from tools.LLM.client import LLMClient, create_client
+
 
 class DeepSeekAPI:
-    def __init__(self):
-        # 加载DeepSeek模型配置
-        config = load_model_config('deepseek')
-        self.base_url = config['base_url']
-        self.model = config['model']
-        self.api_key = load_api_key('deepseek')
+    """DeepSeek 官方 API（OpenAI 兼容协议）"""
 
-    def ask(self, question: str, timeout: Optional[int] = 30) -> Dict[str, Any]:
-        url = f"{self.base_url}/chat/completions"
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-        
-        data = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": PROMPT.format(time(), question)
-                }
-            ]
-        }
+    provider = 'deepseek'
 
-        try:
-            response = requests.post(
-                url,
-                headers=headers,
-                json=data,
-                timeout=timeout
-            )
-            response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"DeepSeek API request failed: {str(e)}")
+    def __init__(self, client: Optional[LLMClient] = None, **overrides):
+        self._client = client or create_client(self.provider, **overrides)
+
+    @property
+    def client(self) -> LLMClient:
+        return self._client
+
+    def ask(self, question: str, timeout: Optional[float] = None) -> str:
+        """向模型提问，返回模型回复的原始文本"""
+        return self._client.ask(question, timeout=timeout)

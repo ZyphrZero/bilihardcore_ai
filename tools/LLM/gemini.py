@@ -1,48 +1,33 @@
-import requests
-from typing import Dict, Any, Optional
-from config.config import PROMPT, load_model_config, load_api_key
-from time import time
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""Gemini 适配器（实际的请求逻辑在 tools/LLM/client.py）
+
+使用 Gemini 原生协议：
+- 非流式：/models/{model}:generateContent
+- 流式：  /models/{model}:streamGenerateContent?alt=sse
+
+Base URL 只需要填到版本号，例如 https://generativelanguage.googleapis.com/v1beta；
+如果只填了域名，客户端会自动补 /v1beta（旧版本这里会拼出 404 的地址）。
+"""
+
+from typing import Optional
+
+from tools.LLM.client import LLMClient, create_client
+
 
 class GeminiAPI:
-    def __init__(self):
-        # 加载Gemini模型配置
-        config = load_model_config('gemini')
-        self.base_url = config['base_url']
-        self.model = config['model']
-        self.api_key = load_api_key('gemini')
+    """Google Gemini 原生 API"""
 
-    def ask(self, question: str, timeout: Optional[int] = 30) -> Dict[str, Any]:
-        url = f"{self.base_url}/models/{self.model}:generateContent"
-        
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
-        data = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": PROMPT.format(time(), question)
-                        }
-                    ]
-                }
-            ]
-        }
+    provider = 'gemini'
 
-        params = {
-            "key": self.api_key
-        }
+    def __init__(self, client: Optional[LLMClient] = None, **overrides):
+        self._client = client or create_client(self.provider, **overrides)
 
-        try:
-            response = requests.post(
-                url,
-                headers=headers,
-                params=params,
-                json=data,
-                timeout=timeout
-            )
-            response.raise_for_status()
-            return response.json()["candidates"][0]["content"]["parts"][0]["text"]
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"Gemini API request failed: {str(e)}")
+    @property
+    def client(self) -> LLMClient:
+        return self._client
+
+    def ask(self, question: str, timeout: Optional[float] = None) -> str:
+        """向模型提问，返回模型回复的原始文本"""
+        return self._client.ask(question, timeout=timeout)

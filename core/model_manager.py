@@ -85,14 +85,15 @@ class ModelManager(QObject):
         """保存模型配置"""
         if model_type not in self.AVAILABLE_MODELS:
             raise ValueError(f"不支持的模型类型: {model_type}")
-        
-        # 保存API密钥
-        if api_key:
-            save_api_key(model_type, api_key)
-        
-        # 保存模型配置
-        if base_url and model_name:
-            save_model_config(model_type, base_url, model_name)
+
+        # 一次原子写入（原先分两次写：先写密钥、再写地址/模型，
+        # 且 base_url/model_name 为空时会静默跳过保存，用户以为保存成功其实没存）
+        save_model_config(
+            model_type,
+            base_url=base_url or None,
+            model_name=model_name or None,
+            api_key=api_key or '',
+        )
             
     def validate_current_model(self):
         """验证当前模型配置"""

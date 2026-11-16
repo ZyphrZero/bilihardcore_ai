@@ -55,6 +55,15 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# 单元测试用的临时配置目录
+tests/_tmp_config/
+
+# 配置回退目录（用户目录不可写时用于存放配置，内含 API Key，绝不能提交）
+/.bili-hardcore/
+
+# uv 的本地缓存
+/.uv-cache/
+
 # Translations
 *.mo
 *.pot
