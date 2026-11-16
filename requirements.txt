@@ -4,7 +4,7 @@ idna==3.10
 qrcode==8.1
 requests==2.32.3
 urllib3==2.3.0
-PySide6==6.9.0
-pillow==11.2.1
+PySide6==6.12.0
+pillow==12.3.0
 loguru==0.7.3
-pyinstaller==6.14.0
+pyinstaller==6.22.3

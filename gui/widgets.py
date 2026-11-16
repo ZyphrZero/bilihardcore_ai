@@ -1,14 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 import webbrowser
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QComboBox, QLineEdit, QTextEdit, 
-                             QFrame, QStackedWidget, QMessageBox, QGroupBox, QFormLayout)
+                             QFrame, QStackedWidget, QMessageBox, QGroupBox, QFormLayout,
+                             QDoubleSpinBox, QSpinBox, QCheckBox)
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QTextCursor
-from config.config import (load_api_key, save_api_key, load_model_config, 
-                          save_model_config)
+from config.config import (ConfigWriteError, load_api_key, load_llm_options,
+                          load_model_config, save_api_key, save_model_config)
+
+
+#: 关闭「思维链」的常见参数写法。选中后填入“额外参数”，仍可手动修改。
+#: 这些都不是 OpenAI 标准字段，只有对应提供商/网关支持时才有效（不支持的网关可能直接 400）。
+THINKING_PRESETS = [
+    ("不设置（默认，保留提供商行为）", None, "不禁用思考；推理模型的思考过程不影响答案解析"),
+    ("百炼 / DashScope（Qwen3）", {"enable_thinking": False},
+     '阿里云百炼兼容模式：{"enable_thinking": false}'),
+    ("OpenRouter", {"reasoning": {"enabled": False}},
+     'OpenRouter：{"reasoning": {"enabled": false}}'),
+    ("通用中转站", {"thinking": {"type": "disabled"}},
+     '部分中转站/网关支持：{"thinking": {"type": "disabled"}}'),
+    ("OpenAI gpt-5 系列", {"reasoning_effort": "minimal"},
+     'OpenAI：reasoning_effort 设为 minimal'),
+    ("Gemini 原生接口", {"generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}},
+     'Gemini 原生接口：thinkingBudget=0 表示关闭思考'),
+]
 
 
 class LogWidget(QWidget):
@@ -272,7 +291,56 @@ class ModelConfigWidget(QWidget):
         model_name_label.setTextFormat(Qt.TextFormat.RichText)
         self.model_input = QLineEdit()
         form_layout.addRow(model_name_label, self.model_input)
-        
+
+        # ---- 请求参数（高级） ----
+        self.connect_timeout_input = QDoubleSpinBox()
+        self.connect_timeout_input.setRange(0.5, 120.0)
+        self.connect_timeout_input.setSingleStep(1.0)
+        self.connect_timeout_input.setDecimals(1)
+        self.connect_timeout_input.setSuffix(" 秒")
+        self.connect_timeout_input.setToolTip("建立连接的超时时间")
+        form_layout.addRow(QLabel("连接超时:"), self.connect_timeout_input)
+
+        self.read_timeout_input = QDoubleSpinBox()
+        self.read_timeout_input.setRange(5.0, 1800.0)
+        self.read_timeout_input.setSingleStep(10.0)
+        self.read_timeout_input.setDecimals(1)
+        self.read_timeout_input.setSuffix(" 秒")
+        self.read_timeout_input.setToolTip(
+            "相邻两次收到数据的最大间隔。开启流式后只要模型持续输出就不会超时；\n"
+            "如果用的是会“攒完再发”的中转站，建议调到 180 秒以上。"
+        )
+        form_layout.addRow(QLabel("读取超时:"), self.read_timeout_input)
+
+        self.retries_input = QSpinBox()
+        self.retries_input.setRange(0, 10)
+        self.retries_input.setToolTip("超时 / 限流(429) / 服务端 5xx 时的重试次数")
+        form_layout.addRow(QLabel("失败重试:"), self.retries_input)
+
+        self.stream_check = QCheckBox("启用流式输出（推荐）")
+        self.stream_check.setToolTip(
+            "流式模式下超时按“数据块间隔”计算，可以避免长回答被整体超时中断"
+        )
+        form_layout.addRow("", self.stream_check)
+
+        self.thinking_combo = QComboBox()
+        for label, payload, note in THINKING_PRESETS:
+            self.thinking_combo.addItem(label)
+            self.thinking_combo.setItemData(self.thinking_combo.count() - 1, note, Qt.ItemDataRole.ToolTipRole)
+        self.thinking_combo.setToolTip(
+            "选择后会把这些参数填进下面的“额外参数”，你可以再手动修改。\n"
+            "注意：deepseek-reasoner 等推理模型无法关闭思考，想彻底不返回思维链请换 deepseek-chat 这类非推理模型。"
+        )
+        self.thinking_combo.currentIndexChanged.connect(self._apply_thinking_preset)
+        form_layout.addRow(QLabel("思维链:"), self.thinking_combo)
+
+        self.extra_body_input = QLineEdit()
+        self.extra_body_input.setPlaceholderText("可选，JSON，例如：{\"thinking\": {\"type\": \"disabled\"}}")
+        self.extra_body_input.setToolTip(
+            "附加到请求体的自定义参数。非标准字段（如 thinking）只在你确认提供商支持时填写"
+        )
+        form_layout.addRow(QLabel("额外参数:"), self.extra_body_input)
+
         # 根据模型类型设置不同的占位符文本
         self._set_placeholders()
 
@@ -299,23 +367,88 @@ class ModelConfigWidget(QWidget):
             self.model_input.setPlaceholderText("例如：deepseek-chat（必填）")
             self.get_key_link.setText("🔗 <a href='https://platform.deepseek.com/api_keys'>点这里获取DeepSeek API密钥</a>")
         elif self.model_type == "gemini":
-            self.url_input.setPlaceholderText("例如：https://generativelanguage.googleapis.com（必填）")
+            self.url_input.setPlaceholderText("例如：https://generativelanguage.googleapis.com/v1beta（必填）")
             self.model_input.setPlaceholderText("例如：gemini-2.0-flash（必填）")
-            self.get_key_link.setText("🔗 <a href='https://aistudio.google.com/app/apikey'>点这里获取Gemini API密钥</a>")
+            self.get_key_link.setText(
+                "🔗 <a href='https://aistudio.google.com/app/apikey'>点这里获取Gemini API密钥</a>"
+                "　（只填域名也可以，会自动补 /v1beta）"
+            )
         elif self.model_type == "custom":
             self.url_input.setPlaceholderText("例如：https://api.siliconflow.cn（必填）")
             self.model_input.setPlaceholderText("例如：deepseek-ai/DeepSeek-V3（必填）")
-            self.get_key_link.setText("💡 请根据您选择的API提供商获取相应的密钥")
-    
+            self.get_key_link.setText(
+                "💡 请根据您选择的API提供商获取相应的密钥"
+                "　（填到 /v1 即可；如已填完整 …/chat/completions 也可以，末尾加 # 表示“这就是完整地址”）"
+            )
+
     def load_settings(self):
         """加载设置"""
         config = load_model_config(self.model_type)
         api_key = load_api_key(self.model_type)
-        
+        options = load_llm_options(self.model_type)
+
         self.url_input.setText(config['base_url'])
         self.model_input.setText(config['model'])
         self.key_input.setText(api_key)
-    
+
+        self.connect_timeout_input.setValue(float(options.get('connect_timeout', 10.0)))
+        self.read_timeout_input.setValue(float(options.get('read_timeout', 180.0)))
+        self.retries_input.setValue(int(options.get('max_retries', 2)))
+        self.stream_check.setChecked(bool(options.get('stream', True)))
+
+        extra_body = options.get('extra_body') or {}
+        self.extra_body_input.setText(
+            json.dumps(extra_body, ensure_ascii=False) if extra_body else ''
+        )
+
+        # 已经存下来的参数原样显示，下拉框回到“不设置”，避免回填时被预设覆盖
+        self.thinking_combo.blockSignals(True)
+        self.thinking_combo.setCurrentIndex(0)
+        self.thinking_combo.blockSignals(False)
+
+    def _apply_thinking_preset(self, index):
+        """把预设的“关闭思考”参数合并进额外参数输入框。"""
+        if index <= 0 or index >= len(THINKING_PRESETS):
+            return
+        payload = THINKING_PRESETS[index][1]
+        if not payload:
+            return
+
+        current = {}
+        existing = self.extra_body_input.text().strip()
+        if existing:
+            try:
+                parsed = json.loads(existing)
+                if isinstance(parsed, dict):
+                    current = parsed
+            except json.JSONDecodeError:
+                # 用户手写的不是合法 JSON，就按预设重建，避免把坏文本留在框里
+                current = {}
+
+        merged = dict(current)
+        merged.update(payload)
+        self.extra_body_input.setText(json.dumps(merged, ensure_ascii=False))
+
+    def _collect_options(self):
+        """收集高级参数，返回 (options, 错误信息)"""
+        extra_text = self.extra_body_input.text().strip()
+        extra_body = {}
+        if extra_text:
+            try:
+                extra_body = json.loads(extra_text)
+            except json.JSONDecodeError as e:
+                return None, f"额外参数不是合法的 JSON：{e}"
+            if not isinstance(extra_body, dict):
+                return None, "额外参数必须是一个 JSON 对象，例如 {\"thinking\": {\"type\": \"disabled\"}}"
+
+        return {
+            'connect_timeout': float(self.connect_timeout_input.value()),
+            'read_timeout': float(self.read_timeout_input.value()),
+            'max_retries': int(self.retries_input.value()),
+            'stream': bool(self.stream_check.isChecked()),
+            'extra_body': extra_body,
+        }, None
+
     def save_settings(self):
         """保存设置"""
         api_key = self.key_input.text().strip()
@@ -358,21 +491,36 @@ class ModelConfigWidget(QWidget):
                 "API Key长度过短，请检查API Key是否正确"
             )
             return
-        
+
+        options, error = self._collect_options()
+        if error:
+            QMessageBox.warning(self, "保存失败", error)
+            return
+
         try:
-            # 保存API密钥
-            save_api_key(self.model_type, api_key)
-            
-            # 保存模型配置
-            save_model_config(self.model_type, base_url, model_name)
-            
+            # 一次原子写入：地址、模型、密钥、请求参数同时落盘，
+            # 不会出现“密钥存了、地址没存”的中间状态
+            save_model_config(
+                self.model_type,
+                base_url=base_url,
+                model_name=model_name,
+                api_key=api_key,
+                options=options,
+            )
             QMessageBox.information(self, "保存成功", "模型配置已保存！")
             
+        except ConfigWriteError as e:
+            # 写盘失败跟“配置填错”是两件事，分开提示，避免用户去改本来就对的配置
+            QMessageBox.critical(
+                self,
+                "保存失败（磁盘写入）",
+                f"{e}\n\n配置内容本身没有问题，是文件没能写到磁盘上。"
+            )
         except Exception as e:
             QMessageBox.critical(
                 self,
                 "保存失败",
-                f"保存设置时出现错误：\n{str(e)}\n\n请检查配置是否正确"
+                f"保存设置时出现错误：\n{str(e)}"
             )
     
     def get_api_key(self):
